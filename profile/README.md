@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="profile/logo.svg" alt="EdgeConneX" width="280">
+<img src="https://raw.githubusercontent.com/EdgeConneX/.github/main/profile/logo.svg" alt="EdgeConneX" width="280">
 
 ### The infrastructure behind hyperlocal-to-hyperscale data centers
 
