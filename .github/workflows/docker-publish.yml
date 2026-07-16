@@ -1,0 +1,134 @@
+name: Docker Publish
+
+# Governance-managed container build + push.
+#
+# PRIMARY registry: GitHub Container Registry (GHCR) — ghcr.io/<owner>/<repo>.
+# Auth is the built-in GITHUB_TOKEN (no external secrets); the package is created
+# automatically on first push and access follows the repo's permissions.
+#
+# SECONDARY registry: Docker Hub (edgeconnex/<repo>) — opt-in only. Set repo or org
+# variable PUBLISH_DOCKERHUB=true and provide org secrets DOCKERHUB_USERNAME /
+# DOCKERHUB_TOKEN to ALSO push there. Off by default; enable per repo when needed.
+#   Optional: DOCKERHUB_NAMESPACE variable (defaults to "edgeconnex").
+#
+# NO-OP unless a Dockerfile exists at the repo root (the detect job gates this).
+
+on:
+  push:
+    branches: ["main"]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write   # push to GHCR using GITHUB_TOKEN
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      has_dockerfile: ${{ steps.check.outputs.has_dockerfile }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - id: check
+        run: |
+          if [ -f Dockerfile ]; then
+            echo "has_dockerfile=true" >> "$GITHUB_OUTPUT"
+            echo "Dockerfile found at repo root — will build and push."
+          else
+            echo "has_dockerfile=false" >> "$GITHUB_OUTPUT"
+            echo "No Dockerfile at repo root — skipping Docker build/push."
+          fi
+
+  build-push:
+    needs: detect
+    if: needs.detect.outputs.has_dockerfile == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Resolve image names (lowercased)
+        id: img
+        env:
+          DH_NS: ${{ vars.DOCKERHUB_NAMESPACE || 'edgeconnex' }}
+          PUBLISH_DH: ${{ vars.PUBLISH_DOCKERHUB }}
+        run: |
+          name="$(printf '%s' "${GITHUB_REPOSITORY##*/}" | tr '[:upper:]' '[:lower:]')"
+          owner="$(printf '%s' "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          images="ghcr.io/${owner}/${name}"
+          if [ "${PUBLISH_DH}" = "true" ]; then
+            images="$(printf '%s\n%s' "${images}" "${DH_NS}/${name}")"
+          fi
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
+          echo "dh_repo=${DH_NS}/${name}" >> "$GITHUB_OUTPUT"
+          { echo "images<<EOF"; echo "${images}"; echo "EOF"; } >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      # --- GHCR (primary, always) ---
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # --- Docker Hub (secondary, opt-in via PUBLISH_DOCKERHUB=true) ---
+      - name: Log in to Docker Hub
+        if: vars.PUBLISH_DOCKERHUB == 'true'
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Ensure Docker Hub repository exists (private)
+        if: vars.PUBLISH_DOCKERHUB == 'true'
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          NS: ${{ vars.DOCKERHUB_NAMESPACE || 'edgeconnex' }}
+          NAME: ${{ steps.img.outputs.name }}
+        run: |
+          jwt=$(curl -fsS -H "Content-Type: application/json" \
+            -d "{\"username\": \"${DOCKERHUB_USERNAME}\", \"password\": \"${DOCKERHUB_TOKEN}\"}" \
+            https://hub.docker.com/v2/users/login/ | jq -r .token)
+          if [ -z "$jwt" ] || [ "$jwt" = "null" ]; then
+            echo "::error::Docker Hub login failed — check DOCKERHUB_USERNAME / DOCKERHUB_TOKEN."
+            exit 1
+          fi
+          code=$(curl -fsS -o /dev/null -w "%{http_code}" -H "Authorization: JWT ${jwt}" \
+            "https://hub.docker.com/v2/repositories/${NS}/${NAME}/" || true)
+          if [ "$code" = "404" ]; then
+            echo "Creating Docker Hub repo ${NS}/${NAME} (private)."
+            curl -fsS -X POST -H "Authorization: JWT ${jwt}" -H "Content-Type: application/json" \
+              -d "{\"namespace\": \"${NS}\", \"name\": \"${NAME}\", \"is_private\": true}" \
+              https://hub.docker.com/v2/repositories/ >/dev/null
+          else
+            echo "Docker Hub repo ${NS}/${NAME} already exists (HTTP ${code})."
+          fi
+
+      - name: Derive tags + labels
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: ${{ steps.img.outputs.images }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=sha,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

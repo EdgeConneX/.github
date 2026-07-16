@@ -1,0 +1,91 @@
+name: Lint
+
+# Governance-managed linting via MegaLinter (cupcake flavor — smaller image,
+# faster pull). It posts a per-linter results COMMENT on the PR, emits SARIF for
+# inline annotations, and auto-fixes fixable issues, delivering them as a separate
+# companion PR (APPLY_FIXES_MODE: pull_request) so a GITHUB_TOKEN commit never
+# suppresses the original PR's required checks. MegaLinter covers, among others:
+#   - ansible-lint                                           (ANSIBLE)
+#   - tflint / terrascan / terraform-fmt + checkov + kics    (TERRAFORM / IaC)
+#   - gitleaks / secretlint / trivy / grype / devskim + kics (security / SCA)
+#   - actionlint, plus python/js/json/yaml/md linters + formatters
+# Semgrep (SAST) runs as a SEPARATE workflow (semgrep.yml): MegaLinter's
+# REPOSITORY_SEMGREP is opt-in and enableable only via the exclusive
+# ENABLE_LINTERS allowlist (which would disable every other linter), so it stays
+# in DISABLE_LINTERS here and is owned by the dedicated workflow.
+# The IaC/ansible linters run project-wide (not diff-scoped), so findings on
+# unchanged roles/modules appear as informational comment/annotation entries.
+#
+# Advisory by design: non-blocking (continue-on-error; no per-linter status
+# checks — feedback is the PR comment + inline SARIF). Lint is NOT a required
+# status check — verify before adding it.
+on:
+  pull_request:
+    branches: ["main"]
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: write        # push the auto-fix branch for the companion PR
+  pull-requests: write   # post the results comment + open the auto-fix PR
+  security-events: write # upload SARIF for inline code-scanning annotations
+
+concurrency:
+  group: lint-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  megalinter:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          # Same-repo PRs: check out the PR branch HEAD (a real branch, so the
+          # auto-fix companion PR can be based on it). Fork PRs / pushes: fall
+          # back to the default ref — a fork's branch name doesn't exist here and
+          # a bare ref would fail the checkout. Full history for diffing.
+          ref: ${{ github.event.pull_request.head.repo.fork && github.sha || (github.head_ref || github.ref_name) }}
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: MegaLinter
+        id: ml
+        continue-on-error: true
+        uses: oxsecurity/megalinter/flavors/cupcake@e08c2b05e3dbc40af4c23f41172ef1e068a7d651 # v8 (cupcake flavor: smaller image, faster pull)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # PR: lint only changed files. push: full tree.
+          VALIDATE_ALL_CODEBASE: ${{ github.event_name != 'pull_request' }}
+          # Feedback via the PR comment + inline SARIF annotations only. Do NOT
+          # post a pass/fail check per linter (that floods the PR with red checks
+          # for advisory findings). The single Lint job stays non-blocking.
+          GITHUB_COMMENT_REPORTER: true
+          GITHUB_STATUS_REPORTER: false
+          SARIF_REPORTER: true               # inline annotations (uploaded below)
+          # Auto-fix fixable issues, delivered as a separate companion PR:
+          APPLY_FIXES: all
+          APPLY_FIXES_EVENT: pull_request
+          APPLY_FIXES_MODE: pull_request
+          # Skip low-value/noisy linters (explicit linter keys — the DISABLE
+          # descriptor-group form is unreliable in v8):
+          DISABLE_LINTERS: SPELL_CSPELL,SPELL_LYCHEE,SPELL_PROSELINT,SPELL_VALE,COPYPASTE_JSCPD,REPOSITORY_SEMGREP
+          # ansible-lint, checkov, tflint, terrascan, kics all run inside
+          # MegaLinter (project-wide, advisory) — no separate workflows needed.
+
+      - name: Upload SARIF (inline annotations)
+        if: always() && hashFiles('megalinter-reports/megalinter-report.sarif') != ''
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@02c5e83432fe5497fd85b873b6c9f16a8578e1d9 # v3
+        with:
+          sarif_file: megalinter-reports/megalinter-report.sarif
+
+      - name: Upload MegaLinter reports
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: megalinter-reports
+          path: megalinter-reports
+          if-no-files-found: ignore
+
