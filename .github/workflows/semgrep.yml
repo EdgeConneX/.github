@@ -1,0 +1,42 @@
+name: Semgrep
+
+# Governance-managed SAST (Semgrep). `--config auto` pulls rules matched to the
+# languages detected in the repo, so it is a no-op where nothing applies and needs
+# no Semgrep account/token. Findings are uploaded to the Security tab (code
+# scanning).
+#
+# Advisory by design: the scan never fails the build (findings surface as alerts,
+# not a red check). To make it enforcing, drop the `|| true` and add "Semgrep" to
+# the org ruleset's required status checks.
+
+on:
+  pull_request:
+    branches: ["main"]
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+jobs:
+  semgrep:
+    runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep@sha256:59fbed6127ea7c5dde3ba6a85142733bb20ea9aaa36120c953904f1539aaf66e # pinned (was floating :latest)
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Semgrep scan
+        run: semgrep scan --config auto --sarif --output semgrep.sarif || true
+
+      - name: Upload findings to code scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@02c5e83432fe5497fd85b873b6c9f16a8578e1d9 # v3
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep

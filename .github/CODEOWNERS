@@ -1,0 +1,13 @@
+# >>> EDGECONNEX GOVERNANCE (managed by EdgeConneX/governance — do not edit) >>>
+# Cloud Services is a required approver for repository ownership and CI/CD
+# changes. These patterns are listed LAST so they always take precedence over
+# any default owner above. Enforced by the org-level ruleset
+# (require_code_owner_review). Do not edit between these markers — changes are
+# overwritten by the governance seeder.
+/CODEOWNERS               @EdgeConneX/cloud-services
+/.github/CODEOWNERS       @EdgeConneX/cloud-services
+/docs/CODEOWNERS          @EdgeConneX/cloud-services
+/.github/                 @EdgeConneX/cloud-services
+/.github/workflows/       @EdgeConneX/cloud-services
+/.github/actions/         @EdgeConneX/cloud-services
+# <<< EDGECONNEX GOVERNANCE (managed by EdgeConneX/governance — do not edit) <<<

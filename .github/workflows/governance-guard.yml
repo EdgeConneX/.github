@@ -1,0 +1,81 @@
+name: Governance guard
+
+# Belt-and-suspenders backstop for the org ruleset. Travels with the repo so the
+# protection still bites even if the org ruleset is ever disabled or scoped out.
+#
+# On PRs that touch governance-sensitive paths (CODEOWNERS in any location, or
+# anything under .github/) it runs an INTEGRITY check: it fails if the CODEOWNERS
+# governance block has been removed or no longer assigns cloud-services.
+#
+# Approval enforcement (cloud-services must approve) is handled by the org
+# ruleset's require_code_owner_review — not here — because verifying team
+# membership needs an org-read token that should not live in every repo.
+#
+# Do NOT add this as a required status check on the default branch: it only runs
+# on pull_request events, so it can never report on the initial commit and would
+# block repo creation from templates. It is an advisory PR check; the hard gate
+# is the ruleset's require_code_owner_review.
+#
+# Managed by EdgeConneX/governance — local edits are overwritten by the seeder.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: governance-guard-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  CLOUD_SERVICES_TEAM: cloud-services
+  ORG: EdgeConneX
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect governance-sensitive changes
+        id: changes
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          CHANGED=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")
+          echo "Changed files:"; echo "$CHANGED"
+          if echo "$CHANGED" | grep -E '(^|/)CODEOWNERS$|^\.github/' >/dev/null; then
+            echo "touched=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "touched=false" >> "$GITHUB_OUTPUT"
+            echo "No governance-sensitive paths changed. Guard passes."
+          fi
+
+      - name: Verify CODEOWNERS governance block is intact
+        if: steps.changes.outputs.touched == 'true'
+        run: |
+          set -euo pipefail
+          FILE=""
+          for f in CODEOWNERS .github/CODEOWNERS docs/CODEOWNERS; do
+            if [ -f "$f" ]; then FILE="$f"; break; fi
+          done
+          if [ -z "$FILE" ]; then
+            echo "::error::No CODEOWNERS file found. The governance block must exist."
+            exit 1
+          fi
+          echo "Checking $FILE"
+          if ! grep -q "@${ORG}/${CLOUD_SERVICES_TEAM}" "$FILE"; then
+            echo "::error::CODEOWNERS no longer assigns @${ORG}/${CLOUD_SERVICES_TEAM}. Governance block was removed or altered."
+            exit 1
+          fi
+          for pat in "/.github/" "/CODEOWNERS"; do
+            grep -q "$pat" "$FILE" || { echo "::error::Missing required ownership pattern: $pat"; exit 1; }
+          done
+          echo "Governance block intact. Approval is enforced by the org ruleset (require_code_owner_review)."
