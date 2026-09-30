@@ -1,13 +1,60 @@
 # >>> EDGECONNEX GOVERNANCE (managed by EdgeConneX/governance — do not edit) >>>
-# Cloud Services is a required approver for repository ownership and CI/CD
-# changes. These patterns are listed LAST so they always take precedence over
-# any default owner above. Enforced by the org-level ruleset
-# (require_code_owner_review). Do not edit between these markers — changes are
-# overwritten by the governance seeder.
-/CODEOWNERS               @EdgeConneX/cloud-services
-/.github/CODEOWNERS       @EdgeConneX/cloud-services
-/docs/CODEOWNERS          @EdgeConneX/cloud-services
-/.github/                 @EdgeConneX/cloud-services
-/.github/workflows/       @EdgeConneX/cloud-services
-/.github/actions/         @EdgeConneX/cloud-services
+# Cloud Services is a required approver for two things, and nothing else:
+#
+#   1. Files that decide WHO OWNS WHAT (CODEOWNERS, in all three locations
+#      GitHub will read it from).
+#   2. CI/CD -- everything that executes in Actions or reaches a secret. This
+#      covers the per-repo pipelines that were built for this repo, not just
+#      the shared workflows the governance seeder rolls out. They are protected
+#      by default precisely because they are unique to the repo and there is no
+#      central copy to restore from.
+#
+# TEAMS CAN STILL ADD THEIR OWN WORKFLOWS. Anything named team-* is carved out
+# below and needs no Cloud Services review -- add, edit and delete freely:
+#
+#     .github/workflows/team-<whatever>.yml     your own workflow
+#     .github/actions/team-<whatever>/          your own composite action
+#     .github/scripts/team-<whatever>           scripts your workflow calls
+#
+# What you cannot do is modify an EXISTING pipeline that is not named team-*.
+# That is the point: new work is yours, established CI/CD is reviewed.
+#
+# WHY A PREFIX AND NOT A governance/ SUBFOLDER: GitHub Actions does not run
+# workflows nested in subdirectories of .github/workflows. Verified against the
+# live API -- .github/workflows/governance/nested.yml is never registered and
+# never runs. A prefix is the only grouping that Actions honours.
+#
+# Everything else under .github/ is NOT claimed and belongs to the repo's own
+# owners: ISSUE_TEMPLATE/, PULL_REQUEST_TEMPLATE.md, SECURITY.md,
+# CONTRIBUTING.md, FUNDING.yml, labeler and release-note config.
+#
+# Enforced by the org ruleset "CODEOWNERS protection (governance paths)"
+# (required_approving_review_count: 0 + require_code_owner_review: true), whose
+# only bypass actors are Cloud Services and the seeder App. Team leads can
+# bypass the everyday one-approval rule on repos they own; not this.
+#
+# ORDER MATTERS. CODEOWNERS is last-match-wins, so this block is appended last
+# and the carve-out is last within it. NOTHING may follow the end marker except
+# blank lines and comments -- an ownerless line after it would silently unprotect
+# these paths. governance-guard.yml fails the PR if anything else appears there.
+#
+# Do not edit between these markers — the governance seeder overwrites them.
+
+# --- Who owns what -----------------------------------------------------------
+/CODEOWNERS                       @EdgeConneX/cloud-services
+/.github/CODEOWNERS               @EdgeConneX/cloud-services
+/docs/CODEOWNERS                  @EdgeConneX/cloud-services
+
+# --- CI/CD, protected by default ----------------------------------------------
+/.github/workflows/               @EdgeConneX/cloud-services
+/.github/actions/                 @EdgeConneX/cloud-services
+/.github/scripts/                 @EdgeConneX/cloud-services
+/.github/dependabot.yml           @EdgeConneX/cloud-services
+
+# --- Team-owned carve-out: NO OWNER, so no review required --------------------
+# Must stay last. Adding any other ownerless pattern here, or after the end
+# marker, punches a hole in everything above.
+/.github/workflows/team-*
+/.github/actions/team-*/
+/.github/scripts/team-*
 # <<< EDGECONNEX GOVERNANCE (managed by EdgeConneX/governance — do not edit) <<<
