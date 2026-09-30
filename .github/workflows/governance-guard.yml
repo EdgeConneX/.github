@@ -1,20 +1,43 @@
 name: Governance guard
 
-# Belt-and-suspenders backstop for the org ruleset. Travels with the repo so the
-# protection still bites even if the org ruleset is ever disabled or scoped out.
+# Belt-and-suspenders backstop for the org rulesets. Travels with the repo so the
+# protection still bites even if a ruleset is ever disabled or scoped out.
 #
-# On PRs that touch governance-sensitive paths (CODEOWNERS in any location, or
-# anything under .github/) it runs an INTEGRITY check: it fails if the CODEOWNERS
-# governance block has been removed or no longer assigns cloud-services.
+# SCOPE. This guard protects a NARROW, explicitly enumerated set of paths --
+# PROTECTED_PATTERNS below -- and nothing else. It used to trigger on all of
+# .github/, which meant editing an issue template was treated as a governance
+# event. It is not. The list here is the same list as the governance block in
+# canonical/blocks/CODEOWNERS.block, and the two must be changed together --
+# scripts/check_governance_paths.py in EdgeConneX/governance enforces that.
+#
+# CI/CD is protected by DEFAULT -- including the per-repo pipelines that are
+# unique to this repo, which have no central copy to restore from. Teams add
+# their own workflows under the team-* carve-out, which needs no review. There
+# is no governance/ subfolder because GitHub Actions does not run workflows
+# nested under .github/workflows; a filename prefix is the only grouping it
+# honours.
+#
+# On PRs that touch one of those paths it runs an INTEGRITY check: it fails if
+# the CODEOWNERS governance block has been removed, no longer assigns
+# cloud-services, has dropped one of the protected patterns, or has had the
+# ownerless carve-out widened.
+#
+# It also checks the REVERSE of the carve-out: a protected workflow that calls
+# a team-* script or action executes code nobody reviewed, which would launder
+# unreviewed code through a reviewed pipeline. That check runs whenever either
+# side changes.
 #
 # Approval enforcement (cloud-services must approve) is handled by the org
-# ruleset's require_code_owner_review — not here — because verifying team
-# membership needs an org-read token that should not live in every repo.
+# ruleset "CODEOWNERS protection (governance paths)" -- not here -- because
+# verifying team membership needs an org-read token that should not live in
+# every repo. That ruleset's only bypass actors are cloud-services and the
+# seeder App: a team lead can bypass the everyday one-approval rule on repos
+# their team owns, but cannot bypass the governance gate.
 #
 # Do NOT add this as a required status check on the default branch: it only runs
 # on pull_request events, so it can never report on the initial commit and would
 # block repo creation from templates. It is an advisory PR check; the hard gate
-# is the ruleset's require_code_owner_review.
+# is the ruleset.
 #
 # Managed by EdgeConneX/governance — local edits are overwritten by the seeder.
 
@@ -32,6 +55,27 @@ concurrency:
 env:
   CLOUD_SERVICES_TEAM: cloud-services
   ORG: EdgeConneX
+  # The protected set, defined once and used by both steps below. Root-anchored,
+  # exactly as CODEOWNERS reads them: a trailing "/" means "this directory and
+  # everything under it", "*" matches within one path segment, otherwise it is
+  # that one file. Anything NOT listed here -- ISSUE_TEMPLATE/,
+  # PULL_REQUEST_TEMPLATE.md, SECURITY.md, CONTRIBUTING.md, FUNDING.yml,
+  # labeler config -- is out of scope and belongs to the repo's own owners.
+  PROTECTED_PATTERNS: |
+    /CODEOWNERS
+    /.github/CODEOWNERS
+    /docs/CODEOWNERS
+    /.github/workflows/
+    /.github/actions/
+    /.github/scripts/
+    /.github/dependabot.yml
+  # Carved out of the above and owned by the repo's team: no review needed.
+  # These must appear in CODEOWNERS with NO owner, and must be the ONLY
+  # ownerless patterns present -- see the trailing-content check below.
+  UNPROTECTED_PATTERNS: |
+    /.github/workflows/team-*
+    /.github/actions/team-*/
+    /.github/scripts/team-*
 
 jobs:
   guard:
@@ -49,13 +93,50 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
+
+          # Turn each CODEOWNERS-style pattern into a root-anchored regex:
+          #   /dir/    -> ^dir/          (prefix match)
+          #   /pre-*   -> ^pre-[^/]*$    (glob, within one path segment)
+          #   /file    -> ^file$         (exact match)
+          build_regex () {
+            local out="" pat p rx
+            while IFS= read -r pat; do
+              [ -n "$pat" ] || continue
+              p="${pat#/}"
+              p="$(printf '%s' "$p" | sed 's/\./\\./g')"
+              p="$(printf '%s' "$p" | sed 's|\*|[^/]*|g')"
+              if [ "${pat: -1}" = "/" ]; then rx="^${p}"; else rx="^${p}$"; fi
+              out="${out:+${out}|}${rx}"
+            done
+            printf '%s' "$out"
+          }
+          PROT_RE="$(build_regex <<< "$PROTECTED_PATTERNS")"
+          FREE_RE="$(build_regex <<< "$UNPROTECTED_PATTERNS")"
+          {
+            echo "prot_re=$PROT_RE"
+            echo "free_re=$FREE_RE"
+          } >> "$GITHUB_OUTPUT"
+
           CHANGED=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")
           echo "Changed files:"; echo "$CHANGED"
-          if echo "$CHANGED" | grep -E '(^|/)CODEOWNERS$|^\.github/' >/dev/null; then
+
+          # Protected minus carved-out. A team-* file is never governance.
+          SENSITIVE=$(echo "$CHANGED" | grep -E "$PROT_RE" | grep -Ev "$FREE_RE" || true)
+          CARVED=$(echo "$CHANGED" | grep -E "$FREE_RE" || true)
+
+          if [ -n "$SENSITIVE" ]; then
+            echo "Governance-sensitive paths touched:"; echo "$SENSITIVE" | sed 's/^/  /'
             echo "touched=true" >> "$GITHUB_OUTPUT"
           else
             echo "touched=false" >> "$GITHUB_OUTPUT"
-            echo "No governance-sensitive paths changed. Guard passes."
+            echo "No governance-sensitive paths changed."
+          fi
+
+          if [ -n "$CARVED" ]; then
+            echo "Team carve-out paths touched:"; echo "$CARVED" | sed 's/^/  /'
+            echo "carved=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "carved=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Verify CODEOWNERS governance block is intact
@@ -71,11 +152,124 @@ jobs:
             exit 1
           fi
           echo "Checking $FILE"
+
+          BEGIN_MARKER="# >>> EDGECONNEX GOVERNANCE (managed by EdgeConneX/governance — do not edit) >>>"
+          END_MARKER="# <<< EDGECONNEX GOVERNANCE (managed by EdgeConneX/governance — do not edit) <<<"
+          missing=0
+
+          if ! grep -qF "$BEGIN_MARKER" "$FILE" || ! grep -qF "$END_MARKER" "$FILE"; then
+            echo "::error::The governance block markers are missing from $FILE."
+            exit 1
+          fi
           if ! grep -q "@${ORG}/${CLOUD_SERVICES_TEAM}" "$FILE"; then
             echo "::error::CODEOWNERS no longer assigns @${ORG}/${CLOUD_SERVICES_TEAM}. Governance block was removed or altered."
             exit 1
           fi
-          for pat in "/.github/" "/CODEOWNERS"; do
-            grep -q "$pat" "$FILE" || { echo "::error::Missing required ownership pattern: $pat"; exit 1; }
+
+          # Only the governance block and anything AFTER it can affect the
+          # outcome: CODEOWNERS is last-match-wins and the block is appended
+          # last, so a repo's own entries above it are overridden already and
+          # are none of this guard's business.
+          awk -v b="$BEGIN_MARKER" 'index($0,b){f=1} f' "$FILE" > /tmp/governed-region
+
+          esc () { printf '%s' "$1" | sed -e 's/\./\\./g' -e 's/\*/\\*/g'; }
+
+          # Every protected pattern must still be claimed by cloud-services.
+          # Matched as a whole field so that, for example, "/.github/workflows/"
+          # cannot be passed off as satisfying "/.github/scripts/". "." and "*"
+          # are escaped so the pattern is compared literally.
+          while IFS= read -r pat; do
+            [ -n "$pat" ] || continue
+            if ! grep -E "^[[:space:]]*$(esc "$pat")[[:space:]]+@${ORG}/${CLOUD_SERVICES_TEAM}([[:space:]]|$)" /tmp/governed-region >/dev/null; then
+              echo "::error::CODEOWNERS is missing the required ownership line: ${pat} @${ORG}/${CLOUD_SERVICES_TEAM}"
+              missing=1
+            fi
+          done <<< "$PROTECTED_PATTERNS"
+
+          # The carve-out must be present and OWNERLESS, or teams lose their
+          # escape hatch.
+          while IFS= read -r pat; do
+            [ -n "$pat" ] || continue
+            if ! grep -E "^[[:space:]]*$(esc "$pat")[[:space:]]*$" /tmp/governed-region >/dev/null; then
+              echo "::error::CODEOWNERS is missing the team carve-out line (it must have no owner): ${pat}"
+              missing=1
+            fi
+          done <<< "$UNPROTECTED_PATTERNS"
+
+          # An ownerless pattern CLEARS ownership for everything it matches, so
+          # any unexpected one inside or after the block can silently unprotect
+          # CI/CD.
+          while IFS= read -r line; do
+            case "$line" in ''|\#*) continue ;; esac
+            case "$line" in *@*) continue ;; esac
+            pat="$(printf '%s' "$line" | awk '{print $1}')"
+            if ! grep -qxF "$pat" <<< "$(sed '/^$/d' <<< "$UNPROTECTED_PATTERNS")"; then
+              echo "::error::Unsanctioned ownerless CODEOWNERS pattern '${pat}'. An entry with no owner removes protection from everything it matches."
+              missing=1
+            fi
+          done < /tmp/governed-region
+
+          # Nothing may follow the end marker: it would override the block.
+          after=$(awk -v e="$END_MARKER" 'f;index($0,e){f=1}' "$FILE" \
+                  | grep -vE '^[[:space:]]*(#.*)?$' || true)
+          if [ -n "$after" ]; then
+            echo "::error::Content appears after the governance end marker; it would override the block:"
+            echo "$after" | sed 's/^/::error::  /'
+            missing=1
+          fi
+
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::CODEOWNERS governance block failed verification."
+            exit 1
+          fi
+          echo "Governance block intact. Approval is enforced by the org ruleset \"CODEOWNERS protection (governance paths)\"."
+
+      - name: Verify no protected workflow depends on carved-out code
+        if: steps.changes.outputs.touched == 'true' || steps.changes.outputs.carved == 'true'
+        env:
+          PROT_RE: ${{ steps.changes.outputs.prot_re }}
+          FREE_RE: ${{ steps.changes.outputs.free_re }}
+        run: |
+          set -euo pipefail
+          # The carve-out cuts both ways. team-* files need no review, so a
+          # PROTECTED workflow that calls one executes unreviewed code with the
+          # same secrets -- laundering it through a reviewed pipeline. Reviewing
+          # the workflow once would then bless every future edit to the script.
+          #
+          # This is an invariant, not a diff check: it holds over the whole tree
+          # on every run, so it also catches the case where the reference was
+          # added long ago and only the team-* file changes now.
+          # This file is skipped: it necessarily contains the literal team-*
+          # patterns it searches for (UNPROTECTED_PATTERNS above), so it would
+          # always match itself -- and since it is seeded into every repo, that
+          # would fail every repo on any CI change. Skipping it is safe because
+          # it is governance-managed: it is CODEOWNERS-protected like any other
+          # protected workflow, and the seeder overwrites it from canonical.
+          SELF='.github/workflows/governance-guard.yml'
+
+          mapfile -t FILES < <(git ls-files \
+            '.github/workflows/*' '.github/actions/*' '.github/scripts/*' \
+            | grep -E "$PROT_RE" | grep -Ev "$FREE_RE" || true)
+
+          bad=0
+          for f in "${FILES[@]:-}"; do
+            [ -n "${f:-}" ] && [ -f "$f" ] || continue
+            [ "$f" = "$SELF" ] && continue
+            # Comment lines are ignored -- mentioning a path is not calling it.
+            # Everything else in the file is scanned, rather than only "uses:"
+            # and "run:" lines, because a multi-line "run: |" invokes scripts on
+            # its continuation lines and those would otherwise be missed.
+            hits=$(grep -vE '^[[:space:]]*#' "$f" \
+                   | grep -nE '(^|[^A-Za-z0-9_-])\.?/?\.github/(workflows|actions|scripts)/team-' || true)
+            if [ -n "$hits" ]; then
+              echo "::error file=$f::Protected file references carved-out (unreviewed) code:"
+              echo "$hits" | sed "s|^|::error file=$f::  |"
+              bad=1
+            fi
           done
-          echo "Governance block intact. Approval is enforced by the org ruleset (require_code_owner_review)."
+
+          if [ "$bad" -ne 0 ]; then
+            echo "::error::A reviewed pipeline must not depend on team-* code. Either inline it, or move it out of the team-* carve-out so it is reviewed too."
+            exit 1
+          fi
+          echo "No protected workflow depends on carved-out code."
